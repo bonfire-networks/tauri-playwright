@@ -603,14 +603,14 @@ async fn eval_js_timed<R: Runtime>(
     }
 }
 
-/// eval_js with the default 30s channel timeout. Suitable for instant JS expressions.
+/// eval_js with a 120s default channel timeout (covers slow async ops like federated member-add).
 async fn eval_js<R: Runtime>(
     app: &Arc<AppHandle<R>>,
     pending: &PendingResults,
     window_label: &str,
     script: &str,
 ) -> Response {
-    eval_js_timed(app, pending, window_label, script, 30_000).await
+    eval_js_timed(app, pending, window_label, script, 120_000).await
 }
 
 /// Take a screenshot by loading html2canvas in the webview and rendering to PNG.
