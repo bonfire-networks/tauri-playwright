@@ -338,17 +338,17 @@ async fn execute_command<R: Runtime>(
 
         Command::WaitForSelector { selector, timeout_ms } => {
             let s = json_str(&selector);
-            eval_js(app, pending, window_label, &format!(
+            eval_js_timed(app, pending, window_label, &format!(
                 r#"(async function(){{ var dl=Date.now()+{t}; while(Date.now()<dl){{ var el=document.querySelector({s}); if(el){{ var r=el.getBoundingClientRect(); var st=getComputedStyle(el); if(r.width>0&&r.height>0&&st.visibility!=='hidden'&&st.display!=='none') return true; }} await new Promise(function(r){{setTimeout(r,50)}}); }} throw new Error('timeout waiting for '+{s}); }})()"#,
                 s=s, t=timeout_ms
-            )).await
+            ), timeout_ms + 5_000).await
         }
         Command::WaitForFunction { expression, timeout_ms } => {
             let e = json_str(&expression);
-            eval_js(app, pending, window_label, &format!(
+            eval_js_timed(app, pending, window_label, &format!(
                 r#"(async function(){{ var dl=Date.now()+{t}; while(Date.now()<dl){{ try{{ var r=({expr}); if(r) return r; }}catch(ex){{}} await new Promise(function(r){{setTimeout(r,100)}}); }} throw new Error('waitForFunction timeout: '+{e}); }})()"#,
                 expr=expression, e=e, t=timeout_ms
-            )).await
+            ), timeout_ms + 5_000).await
         }
         Command::Content => {
             eval_js(app, pending, window_label, "document.documentElement.outerHTML").await
@@ -477,10 +477,10 @@ async fn execute_command<R: Runtime>(
         }
         Command::WaitForUrl { pattern, timeout_ms } => {
             let p = json_str(&pattern);
-            eval_js(app, pending, window_label, &format!(
+            eval_js_timed(app, pending, window_label, &format!(
                 r#"(async function(){{ var dl=Date.now()+{t}; while(Date.now()<dl){{ if(window.location.href.includes({p})||new RegExp({p}).test(window.location.href)) return window.location.href; await new Promise(function(r){{setTimeout(r,100)}}); }} throw new Error('timeout waiting for URL matching '+{p}); }})()"#,
                 p=p, t=timeout_ms
-            )).await
+            ), timeout_ms + 5_000).await
         }
         Command::Screenshot { path } => {
             take_screenshot(app, pending, window_label, path).await
@@ -526,13 +526,14 @@ async fn execute_command<R: Runtime>(
     }
 }
 
-/// Inject JS into the webview via `WebviewWindow::eval()` and wait for the result
-/// to come back through the Tauri IPC `pw_result` command.
-async fn eval_js<R: Runtime>(
+/// Inject JS into the webview via `WebviewWindow::eval()` and wait up to `channel_timeout_ms`
+/// for the result to come back through the Tauri IPC `pw_result` command.
+async fn eval_js_timed<R: Runtime>(
     app: &Arc<AppHandle<R>>,
     pending: &PendingResults,
     window_label: &str,
     script: &str,
+    channel_timeout_ms: u64,
 ) -> Response {
     let id = format!("pw{}", COUNTER.fetch_add(1, Ordering::SeqCst));
 
@@ -580,7 +581,7 @@ async fn eval_js<R: Runtime>(
     }
 
     // Wait for the JS to execute and send the result back via IPC
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(channel_timeout_ms), rx).await {
         Ok(Ok(result_json)) => {
             match serde_json::from_str::<serde_json::Value>(&result_json) {
                 Ok(v) => {
@@ -597,9 +598,19 @@ async fn eval_js<R: Runtime>(
         Ok(Err(_)) => Response::err("channel dropped".to_string()),
         Err(_) => {
             pending.lock().await.remove(&id);
-            Response::err("timeout (30s)".to_string())
+            Response::err(format!("timeout ({}ms)", channel_timeout_ms))
         }
     }
+}
+
+/// eval_js with the default 30s channel timeout. Suitable for instant JS expressions.
+async fn eval_js<R: Runtime>(
+    app: &Arc<AppHandle<R>>,
+    pending: &PendingResults,
+    window_label: &str,
+    script: &str,
+) -> Response {
+    eval_js_timed(app, pending, window_label, script, 30_000).await
 }
 
 /// Take a screenshot by loading html2canvas in the webview and rendering to PNG.
